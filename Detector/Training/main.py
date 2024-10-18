@@ -8,7 +8,7 @@ from tensorflow.keras.layers import Conv2D, MaxPooling2D, Flatten, Dense
 from tensorflow.keras.optimizers import Adam
 from sklearn.model_selection import train_test_split
 from tensorflow.keras import Input
-
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
 
 def load_images_from_folder(folder, label, size=(128, 128)):
     images = []
@@ -25,16 +25,16 @@ def load_images_from_folder(folder, label, size=(128, 128)):
     return np.array(images), np.array(labels)
 
 
-def build_model(input_shape=(128, 128, 1)):
+def build_model():
     model = tf.keras.Sequential([
         Input(shape=(128, 128, 1)),
-        Conv2D(32, (3, 3), activation='relu'),
-        MaxPooling2D((2, 2)),
-        Conv2D(64, (3, 3), activation='relu'),
-        MaxPooling2D((2, 2)),
-        Flatten(),
-        Dense(64, activation='relu'),
-        Dense(1, activation='sigmoid')
+        Conv2D(32, (3, 3), activation='relu'),  # 畳み込み層 (Conv2D)
+        MaxPooling2D((2, 2)),   # プーリング層 (MaxPooling2D)
+        Conv2D(64, (3, 3), activation='relu'),   # 畳み込み層 (Conv2D)
+        MaxPooling2D((2, 2)),  # プーリング層 (MaxPooling2D)
+        Flatten(),  # 平坦化 (Flatten)
+        Dense(64, activation='relu'),  # 全結合層 (Dense)
+        Dense(1, activation='sigmoid')  # 出力層 (Dense)
     ])
     model.compile(optimizer=Adam(learning_rate=0.001), loss='binary_crossentropy', metrics=['accuracy'])
     return model
@@ -59,8 +59,18 @@ def main():
     # モデルを構築
     model = build_model()
 
+    datagen = ImageDataGenerator(
+        rotation_range=20,
+        width_shift_range=0.2,
+        height_shift_range=0.2,
+        zoom_range=0.2,
+        horizontal_flip=True
+    )
+
     # モデルのトレーニング
-    model.fit(x_train, y_train, epochs=10, batch_size=32, validation_data=(x_test, y_test))
+    epochs = 20
+    batch_size = 64
+    model.fit(datagen.flow(x_train, y_train, batch_size=batch_size), epochs=epochs, validation_data=(x_test, y_test))
 
     # モデルの評価
     test_loss, test_acc = model.evaluate(x_test, y_test, verbose=2)

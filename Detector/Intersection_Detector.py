@@ -9,18 +9,8 @@ import math
 import tensorflow as tf
 from tensorflow.keras.layers import Conv2D, MaxPooling2D, Flatten, Dense
 from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.models import load_model
 
-
-"""
-機械学習モデル実行時以下のエラーがでる
-2024-10-18 16:10:15.001374: 
-I tensorflow/core/util/port.cc:153] oneDNN custom operations are on. 
-You may see slightly different numerical results due to floating-point round-off errors from different computation orders. 
-To turn them off, set the environment variable TF_ENABLE_ONEDNN_OPTS=0.
-
-TensorFlowがoneDNN（Deep Neural Network Library）を使用している際の情報メッセージ
-このメッセージ自体はエラーではなく、TensorFlowの挙動に関する通知
-"""
 
 
 class IntersectionDetector:
@@ -49,38 +39,29 @@ class IntersectionDetector:
 
         self.K_ALPHA = 0.8
 
-        self.model = self.build_model()
+        # 事前に保存されたモデルをロード
+        self.K_MODEL_PATH = "./Training/intersection_detector_model.keras"
+        try:
+            self.model = load_model(self.K_MODEL_PATH)
+        except Exception as e:
+            print(f"Error loading model: {e}")
+            return
 
-    def build_model(self):
-        """シンプルなCNNモデルを構築"""
-        model = tf.keras.Sequential([
-            Conv2D(32, (3, 3), activation='relu', input_shape=(128, 128, 1)),
-            MaxPooling2D((2, 2)),
-            Conv2D(64, (3, 3), activation='relu'),
-            MaxPooling2D((2, 2)),
-            Flatten(),
-            Dense(64, activation='relu'),
-            Dense(1, activation='sigmoid')  # 出力は交差点か否かを判別
-        ])
-        model.compile(optimizer=Adam(learning_rate=0.001), loss='binary_crossentropy', metrics=['accuracy'])
-        return model
-
-    def train_model(self, x_train, y_train, epochs=10, batch_size=32):
-        """モデルをトレーニング"""
-        self.model.fit(x_train, y_train, epochs=epochs, batch_size=batch_size)
 
     def predict_intersections(self, image):
         """トレーニングされたモデルを用いて交差点を予測"""
-        processed_image = self.preprocess_image(image)
+        processed_image = IntersectionDetector.preprocess_image(image)
         prediction = self.model.predict(processed_image)
         return prediction > 0.5
 
-    def preprocess_image(self, image):
+    @staticmethod
+    def preprocess_image(image):
         """画像を前処理し、モデルに入力可能な形に変換"""
         image_resized = cv2.resize(image, (128, 128))
         image_gray = cv2.cvtColor(image_resized, cv2.COLOR_BGR2GRAY)
         image_normalized = image_gray / 255.0  # 正規化
         return image_normalized.reshape(1, 128, 128, 1)
+
 
     def extract_region(self, x, y, size=32):
         """画像から指定した座標の周囲の領域を切り出す"""
@@ -89,7 +70,6 @@ class IntersectionDetector:
         x_end = min(self.image.shape[1], x + half_size)
         y_start = max(0, y - half_size)
         y_end = min(self.image.shape[0], y + half_size)
-
         # 領域を切り出し、モデルに入力できる形に変換
         region = self.image[y_start:y_end, x_start:x_end]
         return region
@@ -144,6 +124,8 @@ class IntersectionDetector:
                         if self.predict_intersections(region):
                             self.intersections.append(intersect)
                             self.intersections_with_lines.append((intersect, (line1, line2)))
+                        else:
+                            print("not found predict intersections")
 
                         """
                         self.intersections.append(intersect)
@@ -247,6 +229,48 @@ class IntersectionDetector:
             # 交差点のぼかしが適用された画像を更新
             self.image = combined_image
 
+    """
+    学習モデルを用いて交差点を予測し、交差点をぼかし効果で強調表示
+    """
+    def highlight_intersections_with_blur_using_model(self):
+        if self.image is None:
+            raise ValueError("Image not loaded")
+
+        current_range = self.mask_range
+        blur_strength = self.mask_range if self.mask_range % 2 == 1 else self.mask_range + 1
+        print("blur_strength => {}".format(blur_strength))
+        combined_image = self.image.copy()
+        for (x, y) in self.intersections:
+            # 交差点の周囲の小さな領域を切り出し、学習モデルを使用して交差点かどうかを予測
+            region = self.extract_region(x, y, size=32)
+            if region is None:
+                continue
+
+            is_intersection = self.predict_intersections(region)
+            if not is_intersection:
+                continue
+
+            # マスク用の画像を作成 (全てゼロで初期化)
+            mask = np.zeros(self.image.shape[:2], dtype=np.uint8)
+            # ぼかし範囲を設定
+            x_start = max(0, x - current_range)
+            x_end = min(self.image.shape[1], x + current_range)
+            y_start = max(0, y - current_range)
+            y_end = min(self.image.shape[0], y + current_range)
+            # マスク範囲を設定
+            cv2.rectangle(mask, (x_start, y_start), (x_end, y_end), 255, -1)
+            # 元画像をぼかし
+            blurred_image = cv2.GaussianBlur(self.image, (blur_strength, blur_strength), 0)
+            # ぼかし画像と元画像を合成
+            combined_image[mask == 255] = cv2.addWeighted(self.image, 1 - self.K_ALPHA, blurred_image, self.K_ALPHA, 0)[mask == 255]
+            # 交差点を指定した色で塗りつぶし
+            cv2.circle(combined_image, (x, y), 5, self.intersection_color, -1)
+
+        self.image = combined_image
+
+    """
+    学習モデルを使わない場合の交点検知方法
+    """
     def highlight_intersections_with_directional_blur(self):
         current_range = self.mask_range
         blur_strength = self.mask_range if self.mask_range % 2 == 1 else self.mask_range + 1
@@ -509,7 +533,7 @@ class Application(tk.Tk):
         if detector:
             detector.load_image()
             detector.find_intersections()
-            detector.highlight_intersections_with_directional_blur()
+            detector.highlight_intersections_with_blur_using_model()
             output_path = filedialog.asksaveasfilename(defaultextension=".png", filetypes=[("PNG files", "*.png")])
 
             if output_path:
@@ -521,7 +545,7 @@ class Application(tk.Tk):
         if detector:
             detector.load_image()
             detector.find_intersections()
-            detector.highlight_intersections_with_directional_blur()
+            detector.highlight_intersections_with_blur_using_model()
 
             # 既存のウィンドウが存在している場合は閉じる
             if self.image_window is not None and self.image_window.winfo_exists():
