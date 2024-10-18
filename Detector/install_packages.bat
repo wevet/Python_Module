@@ -10,9 +10,10 @@ if %errorlevel% neq 0 (
 REM Install necessary Python packages
 echo We install the necessary packages...
 pip install opencv-python
+pip install opencv-python-headless
 pip install numpy
 pip install pillow
-pip install photoshop-python-api
+pip install matplotlib
 
 echo All packages have been installed.
 pause
