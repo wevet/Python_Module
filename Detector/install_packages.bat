@@ -14,6 +14,9 @@ pip install opencv-python-headless
 pip install numpy
 pip install pillow
 pip install matplotlib
+pip install tensorflow
+pip install keras
+pip install scikit-learn
 
 echo All packages have been installed.
 pause
