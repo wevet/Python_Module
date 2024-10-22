@@ -15,6 +15,15 @@ from tensorflow.keras.models import load_model
 
 class IntersectionDetector:
 
+    K_CROSS = "cross"
+    K_Y_SHAPE_POSITIVE = "Y-shape-positive"
+    K_Y_SHAPE_NEGATIVE = "Y-shape-negative"
+    K_T_SHAPE_LEFT = "T-shape-left"
+    K_T_SHAPE_RIGHT = "T-shape-right"
+    K_T_SHAPE_UP = "T-shape-up"
+    K_T_SHAPE_DOWN = "T-shape-down"
+    K_UNKNOWN = "unknown"
+
     def __init__(self, image_path,
                  detection_color, intersection_color,
                  threshold=50, min_line_length=100, max_line_gap=10,
@@ -50,17 +59,21 @@ class IntersectionDetector:
 
     def predict_intersections(self, image):
         """トレーニングされたモデルを用いて交差点を予測"""
+        # グレースケール画像を3チャンネル（RGB）に変換
+        if len(image.shape) == 2 or image.shape[-1] == 1:
+            image = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
+
         processed_image = IntersectionDetector.preprocess_image(image)
         prediction = self.model.predict(processed_image)
         return prediction > 0.5
+
 
     @staticmethod
     def preprocess_image(image):
         """画像を前処理し、モデルに入力可能な形に変換"""
         image_resized = cv2.resize(image, (128, 128))
-        image_gray = cv2.cvtColor(image_resized, cv2.COLOR_BGR2GRAY)
-        image_normalized = image_gray / 255.0  # 正規化
-        return image_normalized.reshape(1, 128, 128, 1)
+        image_normalized = image_resized / 255.0  # 正規化
+        return image_normalized.reshape(1, 128, 128, 3).astype(np.float32)
 
 
     def extract_region(self, x, y, size=32):
@@ -73,6 +86,7 @@ class IntersectionDetector:
         # 領域を切り出し、モデルに入力できる形に変換
         region = self.image[y_start:y_end, x_start:x_end]
         return region
+
 
     def load_image(self):
         self.image = cv2.imread(self.image_path)
@@ -92,11 +106,11 @@ class IntersectionDetector:
         lines = cv2.HoughLinesP(edges, 1, np.pi / 180, threshold=self.threshold, minLineLength=self.min_line_length, maxLineGap=self.max_line_gap)
 
         print("------------------read your setting parameters------------------")
-        print("threshold => {}".format(self.threshold))
-        print("min_line_length => {}".format(self.min_line_length))
-        print("max_line_gap => {}".format(self.max_line_gap))
-        print("canny_threshold1 => {}".format(self.canny_threshold1))
-        print("canny_threshold2 => {}".format(self.canny_threshold2))
+        #print("threshold => {}".format(self.threshold))
+        #print("min_line_length => {}".format(self.min_line_length))
+        #print("max_line_gap => {}".format(self.max_line_gap))
+        #print("canny_threshold1 => {}".format(self.canny_threshold1))
+        #print("canny_threshold2 => {}".format(self.canny_threshold2))
         print("angle_threshold => {}".format(self.angle_threshold))
         print("threshold_distance => {}".format(self.threshold_distance))
         print("mask_range => {}".format(self.mask_range))
@@ -121,21 +135,19 @@ class IntersectionDetector:
                         region = self.extract_region(x, y)
 
                         # 学習モデルを使って交差点を予測
-                        if self.predict_intersections(region):
+                        is_intersection = self.predict_intersections(region)
+                        if np.any(is_intersection):  # 配列内のどれかがTrueならば
+                            # 交差点として処理
                             self.intersections.append(intersect)
                             self.intersections_with_lines.append((intersect, (line1, line2)))
                         else:
                             print("not found predict intersections")
 
-                        """
-                        self.intersections.append(intersect)
-                        self.intersections_with_lines.append((intersect, (line1, line2)))
-                        """
-
             # 交差点が近すぎる場合にフィルタリングを行う
             self.filter_close_intersections()
         else:
             print("not found lines")
+
 
     def filter_close_intersections(self):
         local_filtered_intersections = []
@@ -146,9 +158,11 @@ class IntersectionDetector:
 
         self.intersections = local_filtered_intersections
 
+
     @staticmethod
     def calculate_angle(line1, line2):
         """線分の角度を計算"""
+
         def slope(x1, y1, x2, y2):
             return (y2 - y1) / (x2 - x1) if x2 - x1 != 0 else float('inf')
 
@@ -156,14 +170,22 @@ class IntersectionDetector:
         slope1 = slope(line1[0], line1[1], line1[2], line1[3])
         slope2 = slope(line2[0], line2[1], line2[2], line2[3])
 
+        default_angle = 90.0
+        # slope1 や slope2 が無限大の場合のチェック
+        if slope1 == float('inf') or slope2 == float('inf'):
+            # 無限大の場合は特定の角度（例えば90度）を返す
+            return default_angle
+
         # 角度計算時にゼロ除算を回避
         denominator = (1 + slope2 * slope1)
         if abs(denominator) < 1e-6:  # 小さな値に対してチェック
-            return 90.0  # 平行または垂直に近い場合は90度を返す
+            # 平行または垂直に近い場合は90度を返す
+            return default_angle
 
-        # 傾きの違いから角度を計算
+            # 傾きの違いから角度を計算
         angle = math.atan(abs((slope2 - slope1) / denominator))
         return angle * (180.0 / math.pi)
+
 
     def calculate_intersection(self, line1, line2):
         x1, y1, x2, y2 = line1
@@ -171,8 +193,7 @@ class IntersectionDetector:
 
         # 線分の角度を計算
         angle = self.calculate_angle(line1, line2)
-        if angle < self.angle_threshold:
-
+        if angle is None or angle < self.angle_threshold:
             return None
 
         # Using the new intersection formula
@@ -229,6 +250,7 @@ class IntersectionDetector:
             # 交差点のぼかしが適用された画像を更新
             self.image = combined_image
 
+
     """
     学習モデルを用いて交差点を予測し、交差点をぼかし効果で強調表示
     """
@@ -240,33 +262,141 @@ class IntersectionDetector:
         blur_strength = self.mask_range if self.mask_range % 2 == 1 else self.mask_range + 1
         print("blur_strength => {}".format(blur_strength))
         combined_image = self.image.copy()
-        for (x, y) in self.intersections:
+
+        color = self.intersection_color
+
+        for (x, y), (line1, line2) in self.intersections_with_lines:
             # 交差点の周囲の小さな領域を切り出し、学習モデルを使用して交差点かどうかを予測
             region = self.extract_region(x, y, size=32)
             if region is None:
                 continue
 
-            is_intersection = self.predict_intersections(region)
-            if not is_intersection:
-                continue
+            # マスク用のカラー画像を作成 (3チャンネルで初期化)
+            mask = np.zeros((self.image.shape[0], self.image.shape[1], 3), dtype=np.uint8)
 
-            # マスク用の画像を作成 (全てゼロで初期化)
-            mask = np.zeros(self.image.shape[:2], dtype=np.uint8)
-            # ぼかし範囲を設定
-            x_start = max(0, x - current_range)
-            x_end = min(self.image.shape[1], x + current_range)
-            y_start = max(0, y - current_range)
-            y_end = min(self.image.shape[0], y + current_range)
-            # マスク範囲を設定
-            cv2.rectangle(mask, (x_start, y_start), (x_end, y_end), 255, -1)
-            # 元画像をぼかし
-            blurred_image = cv2.GaussianBlur(self.image, (blur_strength, blur_strength), 0)
-            # ぼかし画像と元画像を合成
-            combined_image[mask == 255] = cv2.addWeighted(self.image, 1 - self.K_ALPHA, blurred_image, self.K_ALPHA, 0)[mask == 255]
-            # 交差点を指定した色で塗りつぶし
-            cv2.circle(combined_image, (x, y), 5, self.intersection_color, -1)
+            # 矩形範囲内の状態を検査し、交差点のタイプを決定
+            intersection_type = self.detect_intersection_type(x, y, current_range, self.threshold_distance)
+            print("intersection_type => {}".format(intersection_type))
+
+            # パターンに基づいて描画処理を分岐
+            if intersection_type == self.K_CROSS:
+                cv2.circle(mask, (x, y), current_range, color, -1)
+            elif intersection_type == self.K_T_SHAPE_RIGHT:
+                cv2.ellipse(mask, (x, y), (current_range * 2, current_range), 90, 0, 180, color, -1)
+            elif intersection_type == self.K_T_SHAPE_LEFT:
+                cv2.ellipse(mask, (x, y), (current_range * 2, current_range), 270, 0, 180, color, -1)
+            elif intersection_type == self.K_T_SHAPE_UP:
+                cv2.ellipse(mask, (x, y), (current_range * 2, current_range), 0, 0, 180, color, -1)
+            elif intersection_type == self.K_T_SHAPE_DOWN:
+                cv2.ellipse(mask, (x, y), (current_range * 2, current_range), 180, 0, 180, color, -1)
+            elif intersection_type == self.K_Y_SHAPE_POSITIVE:
+                cv2.ellipse(mask, (x, y), (current_range * 2, current_range), 0, 0, 180, color, -1)
+            elif intersection_type == self.K_Y_SHAPE_NEGATIVE:
+                cv2.ellipse(mask, (x, y), (current_range * 2, current_range), 180, 0, 180, color, -1)
+            else:
+                #cv2.circle(mask, (x, y), current_range, color, -1)
+                pass
+
+            # mask画像をぼかし
+            blurred_image = cv2.GaussianBlur(mask, (blur_strength, blur_strength), 0)
+
+            # マスクが適用されている部分をアルファブレンディング
+            alpha_mask = blurred_image.astype(float) / 255.0
+
+            for c in range(3):
+                combined_image[:, :, c] = (alpha_mask[:, :, c] * self.intersection_color[c] + (1 - alpha_mask[:, :, c]) * combined_image[:, :, c]).astype(np.uint8)
 
         self.image = combined_image
+
+    def check_color_match_numpy(self, pixel_color, target_color, threshold):
+        # 各チャネルごとの差を計算
+        diff = np.abs(pixel_color - target_color)
+        # すべてのチャネルが閾値以下かを判定
+        return np.all(diff <= threshold)
+
+    def detect_intersection_type(self, x, y, search_range=100, threshold=30):
+        x_start = max(0, x - search_range)
+        x_end = min(self.image.shape[1], x + search_range)
+        y_start = max(0, y - search_range)
+        y_end = min(self.image.shape[0], y + search_range)
+
+        vertical_line = False
+        horizontal_line = False
+        diagonal_line_pos_x = False
+        diagonal_line_neg_x = False
+        diagonal_line_pos_y = False
+        diagonal_line_neg_y = False
+        color = self.detection_color
+
+        # 縦線の検出
+        for i in range(y_start, y_end):
+            if self.check_color_match_numpy(self.image[i, x], color, threshold):
+                vertical_line = True
+                break
+
+        # 横線の検出
+        for i in range(x_start, x_end):
+            if self.check_color_match_numpy(self.image[y, i], color, threshold):
+                horizontal_line = True
+                break
+
+        # 斜め線の検出（右上から左下）
+        for i in range(-search_range, search_range + 1):
+            if 0 <= y + i < self.image.shape[0] and 0 <= x + i < self.image.shape[1]:
+                if self.check_color_match_numpy(self.image[y + i, x + i], color, threshold):
+                    diagonal_line_pos_x = True
+                    break
+
+        # 斜め線の検出（左上から右下）
+        for i in range(-search_range, search_range + 1):
+            if 0 <= y - i < self.image.shape[0] and 0 <= x + i < self.image.shape[1]:
+                if self.check_color_match_numpy(self.image[y - i, x + i], color, threshold):
+                    diagonal_line_neg_x = True
+                    break
+
+        # 斜め線の検出（右下から左上）
+        for i in range(-search_range, search_range + 1):
+            if 0 <= y - i < self.image.shape[0] and 0 <= x - i < self.image.shape[1]:
+                if self.check_color_match_numpy(self.image[y - i, x - i], color, threshold):
+                    diagonal_line_neg_y = True
+                    break
+
+        # 斜め線の検出（左下から右上）
+        for i in range(-search_range, search_range + 1):
+            if 0 <= y + i < self.image.shape[0] and 0 <= x - i < self.image.shape[1]:
+                if self.check_color_match_numpy(self.image[y + i, x - i], color, threshold):
+                    diagonal_line_pos_y = True
+                    break
+
+        # 交差のパターンを判定
+        result = self.K_UNKNOWN
+        if vertical_line and horizontal_line:
+            result = self.K_CROSS
+        elif vertical_line and (diagonal_line_pos_x or diagonal_line_pos_y):
+            result = self.K_Y_SHAPE_POSITIVE
+        elif vertical_line and (diagonal_line_neg_x or diagonal_line_neg_y):
+            result = self.K_Y_SHAPE_NEGATIVE
+        elif horizontal_line and (diagonal_line_pos_x or diagonal_line_pos_y):
+            result = self.K_T_SHAPE_RIGHT
+        elif horizontal_line and (diagonal_line_neg_x or diagonal_line_neg_y):
+            result = self.K_T_SHAPE_LEFT
+        elif horizontal_line and vertical_line:
+            result = self.K_T_SHAPE_UP if vertical_line else self.K_T_SHAPE_DOWN
+
+        return result
+
+    @staticmethod
+    def calculate_contrasting_color(color, background_color=(255, 255, 255)):
+        """背景に対してコントラストが高い色を返す"""
+        # 色の明度を計算
+        brightness = (color[0] * 0.299 + color[1] * 0.587 + color[2] * 0.114)
+        background_brightness = (background_color[0] * 0.299 + background_color[1] * 0.587 + background_color[2] * 0.114)
+        # 明度差に基づいて適切な色を決定
+        if abs(brightness - background_brightness) < 128:
+            # 明度差が小さい場合は反転色を使用
+            return (255 - color[0], 255 - color[1], 255 - color[2])
+        else:
+            return color
 
     """
     学習モデルを使わない場合の交点検知方法
@@ -344,17 +474,16 @@ class IntersectionDetector:
                 continue
 
             # マスクを矩形範囲で設定
-            cv2.rectangle(mask, (x_start, y_start), (x_end, y_end), 255, -1)
+            cv2.rectangle(mask, (x_start, y_start), (x_end, y_end), self.intersection_color, -1)
             # 元画像をぼかし
             blurred_image = cv2.GaussianBlur(self.image, (blur_strength, blur_strength), 0)
             # マスクを使って、交差点周辺のみ合成
-            combined_image[mask == 255] = cv2.addWeighted(self.image, 1 - self.K_ALPHA,
-                                                          blurred_image, self.K_ALPHA, 0)[mask == 255]
-
+            combined_image[mask == 255] = cv2.addWeighted(self.image, 1 - self.K_ALPHA, blurred_image, self.K_ALPHA, 0)[mask == 255]
             # 交差点を塗りつぶし
             cv2.circle(self.image, (x, y), 5, self.intersection_color, -1)
 
         self.image = combined_image
+
 
     def save_image(self, output_path):
         cv2.imwrite(output_path, self.image)
@@ -396,21 +525,21 @@ class Application(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title(self.WINDOW_TITLE + " v" + self.MODULE_VERSION)
-        self.geometry("400x800")
+        self.geometry("400x500")
 
         self.image_window = None
         self.canvas = None
         self.image_path = None  # 画像のパス
 
         self.detection_color = (0, 0, 0)  # 検出ラインの初期色（黒）
-        self.intersection_color = (255, 0, 0)  # 交差点の初期色（赤）
+        self.intersection_color = (10, 10, 10)  # 交差点の初期色
         self.threshold = 50  # Hough変換のしきい値
         self.min_line_length = 100  # 最小ライン長
         self.max_line_gap = 20  # ライン間の最大ギャップ
         self.canny_threshold1 = 50  # Cannyのしきい値1
         self.canny_threshold2 = 150  # Cannyのしきい値2
         self.angle_threshold = 10  # 2次元返還時の角度のしきい値
-        self.threshold_distance = 10  # 最小距離しきい値(px)
+        self.threshold_distance = 30  # 最小距離しきい値(px)
         self.mask_range = 30  # ぼかしのしきい値
 
         # preview window size
@@ -430,6 +559,7 @@ class Application(tk.Tk):
         self.intersection_color_label = tk.Label(self, text=f"Current: {self.intersection_color}")
         self.intersection_color_label.grid(row=4, column=0, columnspan=2, padx=10, pady=5)
 
+        """
         tk.Label(self, text="Hough Transform Threshold:").grid(row=5, column=0, padx=10, pady=5)
         self.threshold_slider = tk.Scale(self, from_=10, to=200, orient=tk.HORIZONTAL)
         self.threshold_slider.set(self.threshold)
@@ -454,6 +584,7 @@ class Application(tk.Tk):
         self.canny_threshold2_slider = tk.Scale(self, from_=10, to=255, orient=tk.HORIZONTAL)
         self.canny_threshold2_slider.set(self.canny_threshold2)
         self.canny_threshold2_slider.grid(row=9, column=1, padx=10, pady=5)
+        """
 
         tk.Label(self, text="Angle Threshold (degrees):").grid(row=10, column=0, padx=10, pady=5)
         self.angle_threshold_slider = tk.Scale(self, from_=0, to=90, orient=tk.HORIZONTAL)
@@ -461,7 +592,7 @@ class Application(tk.Tk):
         self.angle_threshold_slider.grid(row=10, column=1, padx=10, pady=5)
 
         tk.Label(self, text="Threshold Distance (px):").grid(row=11, column=0, padx=10, pady=5)
-        self.threshold_distance_slider = tk.Scale(self, from_=1, to=50, orient=tk.HORIZONTAL)
+        self.threshold_distance_slider = tk.Scale(self, from_=1, to=100, orient=tk.HORIZONTAL)
         self.threshold_distance_slider.set(self.threshold_distance)
         self.threshold_distance_slider.grid(row=11, column=1, padx=10, pady=5)
 
@@ -475,6 +606,7 @@ class Application(tk.Tk):
         # プレビューボタン
         tk.Button(self, text="Show Preview", command=self.show_preview).grid(row=14, column=0, columnspan=2, padx=20, pady=10)
 
+
     def open_image_window(self, width=1024, height=1024):
         """キャンバス用の別ウィンドウを開く"""
         self.image_window = tk.Toplevel(self)
@@ -482,10 +614,12 @@ class Application(tk.Tk):
         self.canvas = tk.Canvas(self.image_window, width=width, height=height)
         self.canvas.pack()
 
+
     def load_image(self):
         self.image_path = filedialog.askopenfilename(filetypes=[("Image files", "*.png;*.jpg;*.jpeg")])
         if self.image_path:
             messagebox.showinfo("Image Loaded", f"Image loaded: {self.image_path}")
+
 
     def choose_detection_color(self):
         color = colorchooser.askcolor()[0]
@@ -493,11 +627,13 @@ class Application(tk.Tk):
             self.detection_color = (int(color[2]), int(color[1]), int(color[0]))
             self.detection_color_label.config(text=f"Current: {self.detection_color}")
 
+
     def choose_intersection_color(self):
         color = colorchooser.askcolor()[0]
         if color:
             self.intersection_color = (int(color[2]), int(color[1]), int(color[0]))
             self.intersection_color_label.config(text=f"Current: {self.intersection_color}")
+
 
     def _get_instance(self):
         if not self.image_path:
@@ -505,11 +641,13 @@ class Application(tk.Tk):
             return None
 
         try:
+            """
             self.threshold = int(self.threshold_slider.get())
             self.min_line_length = int(self.min_line_length_slider.get())
             self.max_line_gap = int(self.max_line_gap_slider.get())
             self.canny_threshold1 = int(self.canny_threshold1_slider.get())
             self.canny_threshold2 = int(self.canny_threshold2_slider.get())
+            """
             self.angle_threshold = int(self.angle_threshold_slider.get())
             self.threshold_distance = int(self.threshold_distance_slider.get())
             self.mask_range = int(self.mask_range_slider.get())
@@ -528,6 +666,7 @@ class Application(tk.Tk):
 
         return detector
 
+
     def detect_intersections(self):
         detector = self._get_instance()
         if detector:
@@ -539,6 +678,7 @@ class Application(tk.Tk):
             if output_path:
                 detector.save_image(output_path)
                 messagebox.showinfo("Success", "Intersections highlighted and image saved.")
+
 
     def show_preview(self):
         detector = self._get_instance()
