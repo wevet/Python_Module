@@ -10,6 +10,11 @@ except ImportError:
         print("PyQt5がインポートされました。")
     except ImportError:
         print("PyQt5もPySide6もサポートされていません。")
+        try:
+            from PySide2 import QtWidgets, QtCore
+            print("PySide2がインポートされました。")
+        except ImportError:
+            print("PyQt5もPySide6もPySide2もサポートされていません。")
 
 
 import substance_painter
@@ -180,6 +185,7 @@ def start_plugin():
 def close_plugin():
     delete_gui()
     pass
+
 
 if __name__ == "__main__":
     start_plugin()

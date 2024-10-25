@@ -368,22 +368,24 @@ class IntersectionDetector:
                     diagonal_line_pos_y = True
                     break
 
-        # 交差のパターンを判定
-        result = self.K_UNKNOWN
+        # すべてのチェックが完了してから交差のパターンを判定
         if vertical_line and horizontal_line:
-            result = self.K_CROSS
+            return self.K_CROSS
         elif vertical_line and (diagonal_line_pos_x or diagonal_line_pos_y):
-            result = self.K_Y_SHAPE_POSITIVE
+            return self.K_Y_SHAPE_POSITIVE
         elif vertical_line and (diagonal_line_neg_x or diagonal_line_neg_y):
-            result = self.K_Y_SHAPE_NEGATIVE
+            return self.K_Y_SHAPE_NEGATIVE
         elif horizontal_line and (diagonal_line_pos_x or diagonal_line_pos_y):
-            result = self.K_T_SHAPE_RIGHT
+            return self.K_T_SHAPE_RIGHT
         elif horizontal_line and (diagonal_line_neg_x or diagonal_line_neg_y):
-            result = self.K_T_SHAPE_LEFT
-        elif horizontal_line and vertical_line:
-            result = self.K_T_SHAPE_UP if vertical_line else self.K_T_SHAPE_DOWN
+            return self.K_T_SHAPE_LEFT
+        elif vertical_line and not horizontal_line:
+            return self.K_T_SHAPE_DOWN
+        elif horizontal_line and not vertical_line:
+            return self.K_T_SHAPE_UP
+        else:
+            return self.K_UNKNOWN
 
-        return result
 
     @staticmethod
     def calculate_contrasting_color(color, background_color=(255, 255, 255)):
