@@ -125,16 +125,16 @@ def import_texture_as_mask(texture_path, layer_name):
             if isinstance(params, layerstack.UVProjectionParams):
                 # テクスチャリソースをUVプロジェクションパラメータに設定
                 params.texture = texture_resource.identifier()
-
+                fill_layer.set_source(None, texture_resource.identifier())
                 fill_layer.set_projection_parameters(params)
-                print(f"フィルレイヤー '{layer_name}' にテクスチャ '{texture_path}' を適用しました。")
 
-                # パラメータの詳細を表示
+                print(f"フィルレイヤー '{layer_name}' にテクスチャ '{texture_path}' を適用しました。")
                 print("UVプロジェクションパラメータ:")
                 print(f"テクスチャ: {params.texture}")
                 print(f"スケール: {params.uv_transformation.scale}")
                 print(f"回転: {params.uv_transformation.rotation}")
                 print(f"オフセット: {params.uv_transformation.offset}")
+
 
             else:
                 print("UVプロジェクションパラメータの取得に失敗しました。")
