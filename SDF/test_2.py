@@ -34,7 +34,7 @@ def create_sdf(img_bin):
     return cv2.distanceTransform(img_bin, cv2.DIST_L2, 5).astype(np.float32)
 
 
-def create_dsdf(imgA, imgB):
+def create_distance_sdf(imgA, imgB):
     binA = create_gray_binary(imgA)
     binB = create_gray_binary(imgB)
     sdfA = create_sdf(binA)
@@ -43,7 +43,7 @@ def create_dsdf(imgA, imgB):
     return sdfA / add
 
 
-def directional_blur_based_on_gradient(img, soft_ksize=11, strong_ksize=31, strong_sigma=8):
+def directional_blur_based_on_gradient(img, soft_ksize=11, strong_ksize=31, soft_sigma=2, strong_sigma=8):
     # Sobelで勾配取得
     grad_x = cv2.Sobel(img, cv2.CV_32F, 1, 0, ksize=3)
     grad_y = cv2.Sobel(img, cv2.CV_32F, 0, 1, ksize=3)
@@ -54,7 +54,7 @@ def directional_blur_based_on_gradient(img, soft_ksize=11, strong_ksize=31, stro
     blur_mask = 1.0 - grad_mask
 
     # 2種類のぼかし
-    blur_soft = cv2.GaussianBlur(img, (soft_ksize, soft_ksize), 2)
+    blur_soft = cv2.GaussianBlur(img, (soft_ksize, soft_ksize), soft_sigma)
     blur_strong = cv2.GaussianBlur(img, (strong_ksize, strong_ksize), strong_sigma)
 
     # 重み付き合成
@@ -62,7 +62,7 @@ def directional_blur_based_on_gradient(img, soft_ksize=11, strong_ksize=31, stro
     return out.astype(np.uint8)
 
 
-def blend_with_sdf_transition_v2(images, blendingtimes=50, alpha=0.08, blur_ksize=(75, 75), blur_sigma=3.0):
+def blend_with_sdf_transition_v2(images, blendingtimes=50, alpha=0.08):
     h, w = images[0].shape
     accumulation = np.zeros((h, w), dtype=np.float32)
 
@@ -70,14 +70,13 @@ def blend_with_sdf_transition_v2(images, blendingtimes=50, alpha=0.08, blur_ksiz
         layer = np.zeros((h, w), dtype=np.float32)
         for t in range(blendingtimes):
             alpha_t = alpha * (1.0 - t / blendingtimes)
-            dsdf = create_dsdf(images[i], images[i + 1])
+            dsdf = create_distance_sdf(images[i], images[i + 1])
             layer = layer * (1 - alpha_t) + dsdf * alpha_t
         accumulation += layer
 
     accumulation /= (len(images) - 1)
     accumulation = cv2.normalize(accumulation, None, 0, 255, cv2.NORM_MINMAX)
-    blurred = directional_blur_based_on_gradient(accumulation)
-    return blurred
+    return accumulation
 
 
 if __name__ == "__main__":
@@ -87,13 +86,20 @@ if __name__ == "__main__":
     images = load_images(asset_folder)
     sample = cv2.imread(sample_path, cv2.IMREAD_GRAYSCALE)
 
-    result = blend_with_sdf_transition_v2(
+    accumulation = blend_with_sdf_transition_v2(
         images,
-        blendingtimes=50,
-        alpha=0.01,
-        blur_ksize=(125, 125),
-        blur_sigma=3.0
+        blendingtimes=2,
+        alpha=0.01
     )
 
-    cv2.imwrite("sdf_combined.png", result)
-    evaluate(result, sample)
+    blurred = directional_blur_based_on_gradient(
+        accumulation,
+        soft_ksize=11,
+        strong_ksize=31,
+        soft_sigma=2,
+        strong_sigma=8
+    )
+
+    cv2.imwrite("sdf_combined.png", blurred)
+    evaluate(blurred, sample)
+

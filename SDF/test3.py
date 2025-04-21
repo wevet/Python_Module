@@ -36,34 +36,41 @@ def create_sdf(img_bin):
     return cv2.distanceTransform(img_bin, cv2.DIST_L2, 5).astype(np.float32)
 
 
-def blend_with_sdf_transition_v2(images):
+def blend_with_sdf_transition_v4(images):
     h, w = images[0].shape
     accumulation = np.zeros((h, w), dtype=np.float32)
+    count = 0
 
-    for i in range(len(images) - 1):
-        imgA = images[i].astype(np.float32)
-        imgB = images[i + 1].astype(np.float32)
-
+    def sdf_weight(imgA, imgB):
         binA = create_gray_binary(imgA)
         binB = create_gray_binary(imgB)
         sdfA = create_sdf(binA)
         sdfB = create_sdf(255 - binB)
-        dsdf = sdfA / (sdfA + sdfB + 1e-6)
+        return sdfA / (sdfA + sdfB + 1e-6)
 
-        layer = imgA * dsdf + imgB * (1.0 - dsdf)
-        accumulation += layer
+    for i in range(1, len(images) - 1):
+        img_prev = images[i - 1].astype(np.float32)
+        img_curr = images[i].astype(np.float32)
+        img_next = images[i + 1].astype(np.float32)
 
-    accumulation /= len(images)
-    accumulation = cv2.normalize(accumulation, None, 0.0, 1.0, cv2.NORM_MINMAX)
+        # SDFベースの重み（中心基準で左右ブレンド）
+        w_prev = sdf_weight(img_curr, img_prev)
+        w_next = sdf_weight(img_curr, img_next)
+        w_curr = 1.5  # 中心を強調するため直接加算
 
-    center_mask = (accumulation > 0.35) & (accumulation < 0.75)
+        # 重み付き合成（中心主役・左右からフェード的に加算）
+        blend = (
+            img_prev * (1.0 - w_prev) +
+            img_curr * w_curr +
+            img_next * (1.0 - w_next)
+        ) / (w_curr + 1.0 - w_prev + 1.0 - w_next)
 
-    output = np.copy(accumulation)
-    output[center_mask] = accumulation[center_mask]
+        accumulation += blend
+        count += 1
 
-    # 8bit化
-    output *= 255
-    return np.clip(output, 0, 255).astype(np.uint8)
+    accumulation /= count
+    accumulation = cv2.normalize(accumulation, None, 0, 255, cv2.NORM_MINMAX)
+    return accumulation.astype(np.uint8)
 
 
 
@@ -74,7 +81,7 @@ if __name__ == "__main__":
     images = load_images(asset_folder)
     sample = cv2.imread(sample_path, cv2.IMREAD_GRAYSCALE)
 
-    accumulation = blend_with_sdf_transition_v2(images)
+    accumulation = blend_with_sdf_transition_v4(images)
 
     cv2.imwrite("sdf_combined.png", accumulation)
     evaluate(accumulation, sample)
