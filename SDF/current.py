@@ -1,10 +1,7 @@
 import cv2
 import numpy as np
 import os
-
-LEVELS = 16
-R = 8  # 水平方向のぼかし範囲
-
+import cv2.ximgproc as xip
 
 def load_images(folder):
     files = sorted([
@@ -34,64 +31,56 @@ def create_sdf(img_bin):
     return cv2.distanceTransform(img_bin, cv2.DIST_L2, cv2.DIST_MASK_PRECISE)
 
 
-def debug_and_save(images, idx, outdir="debug"):
-    os.makedirs(outdir, exist_ok=True)
-    prev = images[idx-1].astype(np.float32)
-    curr = images[idx].astype(np.float32)
-
-    # 1) 生のSDF重み
-    bin_c = (curr > 85).astype(np.uint8) * 255
-    bin_p = (prev > 85).astype(np.uint8) * 255
-    sdfA = cv2.distanceTransform(bin_c,   cv2.DIST_L2, cv2.DIST_MASK_PRECISE)
-    sdfB = cv2.distanceTransform(255 - bin_p, cv2.DIST_L2, cv2.DIST_MASK_PRECISE)
-    w = sdfA / (sdfA + sdfB + 1e-6)
-    cv2.imwrite(f"{outdir}/w_raw_{idx}.png", (w * 255).astype(np.uint8))
-
-    # 2) 水平ブラー
-    w_h = cv2.blur(w, (2*R+1, 1))
-    cv2.imwrite(f"{outdir}/w_h_{idx}.png", (w_h * 255).astype(np.uint8))
-
-    # 3) 量子化
-    wq = np.floor(w_h * LEVELS + 0.5)
-    wq = np.clip(wq, 0, LEVELS) / LEVELS
-    cv2.imwrite(f"{outdir}/w_q_{idx}.png", (wq * 255).astype(np.uint8))
+LEVELS = 16
+R = 8  # 水平方向のぼかし範囲
 
 
-def blend_with_quantized_horizontal_blur(images):
+def blend_with_fade_smooth(images):
     h, w = images[0].shape
     acc = np.zeros((h, w), dtype=np.float32)
+
+    # ブラー半径＆カーネル
+    sigma = R
+    k = 2*R + 1
+    ksize = (k, k)
+
+    # 境界マージン（wmap がここだけぼかし対象）
+    eps = 2.0 / LEVELS    # マージンをやや広げる
 
     for i in range(1, len(images)-1):
         prev = images[i-1].astype(np.float32)
         curr = images[i].astype(np.float32)
 
-        # 1) SDF 重み
-        bin_curr = (curr > 85).astype(np.uint8) * 255
-        bin_prev = (prev > 85).astype(np.uint8) * 255
-        sdfA = cv2.distanceTransform(bin_curr, cv2.DIST_L2, cv2.DIST_MASK_PRECISE)
-        sdfB = cv2.distanceTransform(255 - bin_prev, cv2.DIST_L2, cv2.DIST_MASK_PRECISE)
-        w = sdfA / (sdfA + sdfB + 1e-6)
+        # 1) SDF 重みマップ
+        bin_c = (curr > 85).astype(np.uint8)*255
+        bin_p = (prev > 85).astype(np.uint8)*255
+        sdfA = cv2.distanceTransform(bin_c,   cv2.DIST_L2, cv2.DIST_MASK_PRECISE)
+        sdfB = cv2.distanceTransform(255-bin_p, cv2.DIST_L2, cv2.DIST_MASK_PRECISE)
+        wmap = sdfA / (sdfA + sdfB + 1e-6)
 
-        # 2–4) 量子化
-        wq = np.floor(w * LEVELS + 0.5)
-        wq = np.clip(wq, 0, LEVELS) / LEVELS
+        # 2) ぼかし用マスク（境界付近だけ 1.0）
+        mask = ((wmap > eps) & (wmap < 1.0 - eps)).astype(np.float32)
 
-        # 5) 水平方向ボックスブラー
-        w_smooth = cv2.blur(wq, (2*R+1, 1))
+        # 3) ガウシアンぼかし：重みとマスク
+        w_blur = cv2.GaussianBlur(wmap, ksize, sigmaX=sigma, sigmaY=sigma)
+        mask_blur = cv2.GaussianBlur(mask, ksize, sigmaX=sigma, sigmaY=sigma)
 
-        # 6) 合成
-        blend = prev * (1 - w_smooth) + curr * w_smooth
+        # 4) フェード合成（α = mask_blur）
+        w_smooth = mask_blur * w_blur + (1.0 - mask_blur) * wmap
+
+        # 5) 画像合成
+        blend = prev * (1.0 - w_smooth) + curr * w_smooth
         acc += blend
 
-    acc /= (len(images) - 2)
-    return np.clip(acc, 0, 255).astype(np.uint8)
+    result = np.clip(acc / (len(images) - 2), 0, 255).astype(np.uint8)
+    return result
 
 
 if __name__ == "__main__":
     images = load_images("./Assets")
     sample = cv2.imread("./sample.png", cv2.IMREAD_GRAYSCALE)
 
-    result = blend_with_quantized_horizontal_blur(images)
+    result = blend_with_fade_smooth(images)
 
     cv2.imwrite("sdf_combined.png", result)
     evaluate(result, sample)
