@@ -2,8 +2,13 @@ import cv2
 import numpy as np
 import os
 
-LEVELS = 16
-R = 8  # 水平方向のぼかし範囲
+
+# 量子化レベル数 (必要に応じて増やす)
+LEVELS = 64
+# 水平方向ぼかし半径
+R = 8
+# 最終結果へのガウスぼかし強度
+GAUSSIAN_SIGMA = 1.0
 
 
 def load_images(folder):
@@ -58,6 +63,12 @@ def debug_and_save(images, idx, outdir="debug"):
 
 
 def blend_with_quantized_horizontal_blur(images):
+    """
+    修正版：
+    - フレームペアは (0,1),(1,2)...(N-2,N-1) の N-1 ペア
+    - 一律 (N-1) で割って平均化
+    - 量子化は blur のあとに実施
+    """
     h, w = images[0].shape
     acc = np.zeros((h, w), dtype=np.float32)
 
@@ -87,13 +98,14 @@ def blend_with_quantized_horizontal_blur(images):
     return np.clip(acc, 0, 255).astype(np.uint8)
 
 
+
 if __name__ == "__main__":
     images = load_images("./Assets")
     sample = cv2.imread("./sample.png", cv2.IMREAD_GRAYSCALE)
 
     result = blend_with_quantized_horizontal_blur(images)
-
     cv2.imwrite("sdf_combined.png", result)
+
     evaluate(result, sample)
 
 
