@@ -4,11 +4,9 @@ import os
 
 
 # 量子化レベル数 (必要に応じて増やす)
-LEVELS = 64
+LEVELS = 4096
 # 水平方向ぼかし半径
-R = 8
-# 最終結果へのガウスぼかし強度
-GAUSSIAN_SIGMA = 1.0
+RADIUS = 0
 
 
 def load_images(folder):
@@ -30,50 +28,19 @@ def evaluate(output, sample):
     return diff
 
 
-def create_gray_binary(img, threshold=85):
-    _, binary = cv2.threshold(img, threshold, 255, cv2.THRESH_BINARY)
-    return binary.astype(np.uint8)
 
-
-def create_sdf(img_bin):
-    return cv2.distanceTransform(img_bin, cv2.DIST_L2, cv2.DIST_MASK_PRECISE)
-
-
-def debug_and_save(images, idx, outdir="debug"):
-    os.makedirs(outdir, exist_ok=True)
-    prev = images[idx-1].astype(np.float32)
-    curr = images[idx].astype(np.float32)
-
-    # 1) 生のSDF重み
-    bin_c = (curr > 85).astype(np.uint8) * 255
-    bin_p = (prev > 85).astype(np.uint8) * 255
-    sdfA = cv2.distanceTransform(bin_c,   cv2.DIST_L2, cv2.DIST_MASK_PRECISE)
-    sdfB = cv2.distanceTransform(255 - bin_p, cv2.DIST_L2, cv2.DIST_MASK_PRECISE)
-    w = sdfA / (sdfA + sdfB + 1e-6)
-    cv2.imwrite(f"{outdir}/w_raw_{idx}.png", (w * 255).astype(np.uint8))
-
-    # 2) 水平ブラー
-    w_h = cv2.blur(w, (2*R+1, 1))
-    cv2.imwrite(f"{outdir}/w_h_{idx}.png", (w_h * 255).astype(np.uint8))
-
-    # 3) 量子化
-    wq = np.floor(w_h * LEVELS + 0.5)
-    wq = np.clip(wq, 0, LEVELS) / LEVELS
-    cv2.imwrite(f"{outdir}/w_q_{idx}.png", (wq * 255).astype(np.uint8))
-
-
-def blend_with_quantized_horizontal_blur(images):
+def blend_with_quantized_global(images, levels=64, radius=5):
     """
-    修正版：
-    - フレームペアは (0,1),(1,2)...(N-2,N-1) の N-1 ペア
-    - 一律 (N-1) で割って平均化
-    - 量子化は blur のあとに実施
+    ・フレームペアごとに SDF 重みを計算し、水平ブラー→量子化→再度ブラー をかけた後に合成
+    ・最後にできた float32 の結果画像全体を改めて LEVELS 段階に丸め込んでから uint8 化
     """
+
     h, w = images[0].shape
     acc = np.zeros((h, w), dtype=np.float32)
 
-    for i in range(1, len(images)-1):
-        prev = images[i-1].astype(np.float32)
+    # --- 前半：各フレームペアごとにブレンドして acc に足し込む ---
+    for i in range(1, len(images) - 1):
+        prev = images[i - 1].astype(np.float32)
         curr = images[i].astype(np.float32)
 
         # 1) SDF 重み
@@ -81,21 +48,34 @@ def blend_with_quantized_horizontal_blur(images):
         bin_prev = (prev > 85).astype(np.uint8) * 255
         sdfA = cv2.distanceTransform(bin_curr, cv2.DIST_L2, cv2.DIST_MASK_PRECISE)
         sdfB = cv2.distanceTransform(255 - bin_prev, cv2.DIST_L2, cv2.DIST_MASK_PRECISE)
-        w = sdfA / (sdfA + sdfB + 1e-6)
 
-        # 2–4) 量子化
-        wq = np.floor(w * LEVELS + 0.5)
-        wq = np.clip(wq, 0, LEVELS) / LEVELS
+        # 2) 重み w を計算
+        w_sdf = sdfA / (sdfA + sdfB + 1e-6)
 
-        # 5) 水平方向ボックスブラー
-        w_smooth = cv2.blur(wq, (2*R+1, 1))
+        # 3) まず水平ブラー（float）
+        w_blur = cv2.blur(w_sdf, (2 * radius + 1, 2 * radius + 1))
 
-        # 6) 合成
-        blend = prev * (1 - w_smooth) + curr * w_smooth
+        # 4) 量子化（重みを LEVELS 段階に丸める）
+        wq = np.floor(w_blur * levels + 0.5)
+        wq = np.clip(wq, 0, levels) / float(levels)
+
+        # 5) 量子化後の wq に再度水平ブラー
+        w_smooth = cv2.blur(wq, (2 * radius + 1, 2 * radius + 1))
+
+        # 6) ブレンド → acc に足し込み
+        blend = prev * (1.0 - w_smooth) + curr * w_smooth
         acc += blend
 
-    acc /= (len(images) - 2)
-    return np.clip(acc, 0, 255).astype(np.uint8)
+    # --- 後半：平均化した float32 画像を改めて LEVELS 段階に丸め込んで uint8 化 ---
+    avg_img = acc / (len(images) - 2)  # float32, 範囲はおおよそ 0～255
+
+    threshold = 255.0
+    # 例: ここで画素値[0,255]をまず [0,1] に正規化し、LEVELS 段階に量子化→再度 [0,255] に戻す
+    norm = np.clip(avg_img / threshold, 0.0, 1.0)      # [0,1] の float32
+    q = np.floor(norm * levels) # [0, LEVELS] の float
+    q = np.clip(q, 0, levels) / float(levels)     # [0,1] の float に戻す
+    output = np.clip(q * threshold, 0, threshold).astype(np.uint8)
+    return output
 
 
 
@@ -103,9 +83,10 @@ if __name__ == "__main__":
     images = load_images("./Assets")
     sample = cv2.imread("./sample.png", cv2.IMREAD_GRAYSCALE)
 
-    result = blend_with_quantized_horizontal_blur(images)
+    result = blend_with_quantized_global(images, levels=LEVELS, radius=RADIUS)
     cv2.imwrite("sdf_combined.png", result)
 
     evaluate(result, sample)
+
 
 
