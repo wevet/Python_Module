@@ -2,39 +2,39 @@ import cv2
 import numpy as np
 import os
 
-
-# 量子化レベル数 (必要に応じて増やす)
+# 量子化の段階数（4096 にすると最終的に 12bit 相当の階調。必要に応じて 16384 などに増やしても OK）
 LEVELS = 4096
-# 水平方向ぼかし半径
-RADIUS = 0
+# 水平ブラー（cv2.blur）の半径：（2*RADIUS+1）×(2*RADIUS+1) カーネルを使う
+RADIUS = 1
+# トレンド除去のために左右何割を利用するか
+EDGE_RATIO = 0.1
 
 
 def load_images(folder):
     files = sorted([
         os.path.join(folder, f)
         for f in os.listdir(folder)
-        if f.lower().endswith(('.png', '.jpg', '.jpeg'))
+        if f.lower().endswith(('.png','jpg','jpeg'))
     ])
     images = [cv2.imread(p, cv2.IMREAD_GRAYSCALE).astype(np.float32) for p in files]
     return images
 
 
 def evaluate(output, sample):
+    # output と sample はどちらも uint8 のはず
     diff = cv2.absdiff(output, sample)
-    print(f"🔍 完全一致: {np.mean(diff==0)*100:.2f}%")
-    print(f"🟡 ±1まで一致: {np.mean(diff<=1)*100:.2f}%")
+    print(f"🔍 完全一致: {np.mean(diff == 0) * 100:.2f}%")
+    print(f"🟡 ±1まで一致: {np.mean(diff <= 1) * 100:.2f}%")
     print(f"📊 平均差分: {np.mean(diff):.2f}")
     print(f"📈 最大差分: {np.max(diff)}")
     return diff
 
 
-
-def blend_with_quantized_global(images, levels=64, radius=5):
+def blend_with_quantized_global(images, levels=LEVELS, radius=1):
     """
     ・フレームペアごとに SDF 重みを計算し、水平ブラー→量子化→再度ブラー をかけた後に合成
     ・最後にできた float32 の結果画像全体を改めて LEVELS 段階に丸め込んでから uint8 化
     """
-
     h, w = images[0].shape
     acc = np.zeros((h, w), dtype=np.float32)
 
@@ -71,22 +71,24 @@ def blend_with_quantized_global(images, levels=64, radius=5):
 
     threshold = 255.0
     # 例: ここで画素値[0,255]をまず [0,1] に正規化し、LEVELS 段階に量子化→再度 [0,255] に戻す
-    norm = np.clip(avg_img / threshold, 0.0, 1.0)      # [0,1] の float32
-    q = np.floor(norm * levels) # [0, LEVELS] の float
-    q = np.clip(q, 0, levels) / float(levels)     # [0,1] の float に戻す
+    # [0,1] の float32
+    norm = np.clip(avg_img / threshold, 0.0, 1.0)
+    # [0, LEVELS] の float
+    q = np.floor(norm * levels)
+    # [0,1] の float に戻す
+    q = np.clip(q, 0, levels) / float(levels)
     output = np.clip(q * threshold, 0, threshold).astype(np.uint8)
     return output
+
+
 
 
 
 if __name__ == "__main__":
     images = load_images("./Assets")
     sample = cv2.imread("./sample.png", cv2.IMREAD_GRAYSCALE)
-
-    result = blend_with_quantized_global(images, levels=LEVELS, radius=RADIUS)
+    result = blend_with_quantized_global(images, levels=LEVELS)
     cv2.imwrite("sdf_combined.png", result)
-
     evaluate(result, sample)
-
 
 

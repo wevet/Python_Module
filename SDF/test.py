@@ -29,129 +29,154 @@ def evaluate(output, sample):
 
 
 
-def blend_with_quantized_global_backup(images, levels=4096, radius=5):
-    # -----------------------------------------------------------
-    # [1] 画像を二値化 (0/1) して SDF を計算
-    # -----------------------------------------------------------
-    bins = [(img > 128).astype(np.uint8) for img in images]
-    N = len(bins)
-    h, w = bins[0].shape
+def blend_with_quantized_global_side(images, levels=4096, radius=1):
+    """
+    sample.png に極力近づけるため、中央および左右のバンディングを除去する。
+    - a~h の画像からのみ合成
+    - load_images, evaluate の変更禁止
+    - main 関数は変更せず、関数名は blend_with_quantized_global で固定
+    - radius=1 のままで最大限バンディングを除去
+    """
 
-    sdist = np.zeros((N, h, w), dtype=np.float32)
-    for i in range(N):
-        # inside/outside それぞれで距離変換
-        pos = cv2.distanceTransform(bins[i], cv2.DIST_L2, cv2.DIST_MASK_PRECISE)
-        neg = cv2.distanceTransform(1 - bins[i], cv2.DIST_L2, cv2.DIST_MASK_PRECISE)
-        s_i = pos.copy()
-        s_i[bins[i] == 0] = -neg[bins[i] == 0]
-        sdist[i] = s_i
-
-    # -----------------------------------------------------------
-    # [2] 各ピクセルで「何枚目のスライスか」と「次のスライスへの補間比率 f」を求める
-    # -----------------------------------------------------------
-    inside = (sdist > 0)  # 各スライス内側なら True
-    count = inside.sum(axis=0)  # 各ピクセルで「何枚目まで inside か（整数）」
-    i_idx = count - 1  # 『内側スライス番号』に対応。0～(N-1) の範囲
-    mask_lin = (i_idx >= 0) & (i_idx < N - 1)
-    i_clipped = np.clip(i_idx, 0, N - 2).astype(np.int32)
-
-    ys = np.arange(h, dtype=np.int32)[:, None]
-    xs = np.arange(w, dtype=np.int32)[None, :]
-
-    s_i = sdist[i_clipped, ys, xs]
-    s_next = sdist[i_clipped + 1, ys, xs]
-
-    # f = s_i / (s_i - s_next) だが、ゼロ除算を避ける
-    denom = (s_i - s_next).astype(np.float32)
-    denom_safe = denom.copy()
-    denom_safe[np.abs(denom_safe) < 1e-6] = 1e-6
-    f = (s_i / denom_safe).astype(np.float32)
-    f = np.clip(f, 0.0, 1.0)
-
-    # cont に「整数スライス番号 + 補間比率 f」を積算
-    cont = np.zeros((h, w), dtype=np.float32)
-    cont[mask_lin] = (i_idx[mask_lin] + f[mask_lin]).astype(np.float32)
-
-    # もし i_idx >= (N-1) なら最終スライス扱い
-    mask_top = (i_idx >= (N - 1))
-    cont[mask_top] = float(N - 1)
-
-    # -----------------------------------------------------------
-    # [3] 【最重要変更点】まず“整数的な cont” を先に横方向ガウシアンブラー
-    # -----------------------------------------------------------
-    # sigmaX=1.5 程度で中央バンディングはかなり目立たなくなります。
-    # 必要に応じて 1.0～2.0 の間で微調整してください。
-    cont_blur = cv2.GaussianBlur(
-        cont,
-        ksize=(0, 0), # 自動で奇数カーネルを選択
-        sigmaX=1.5, # ← ここを変えると中央部の帯の消え具合が変わります
-        sigmaY=0.0,
-        borderType=cv2.BORDER_REPLICATE
-    )
-
-    # -----------------------------------------------------------
-    # [4] ブラー後に正規化 → 8bit に丸める
-    # -----------------------------------------------------------
-    cont_norm2 = cont_blur / float(N - 1)           # 0..1 に落とし込む
-    output8 = np.clip((cont_norm2 * 255.0), 0.0, 255.0).astype(np.uint8)
-    return output8
-
-
-
-def blend_with_quantized_global(images, levels=4096, radius=5):
+    N = len(images) - 1
     h, w = images[0].shape
-    acc = np.zeros((h, w), dtype=np.float32)
-    n_pairs = len(images) - 2     # ← 正しくは N-2 ペア
-    bt = cv2.BORDER_REFLECT_101
 
-    # --- (1) SDF 計算 ---
-    bins = [(img > 85).astype(np.uint8) for img in images]
-    N = len(bins)
+    # --- 1) 2値化と SDF 計算 ---
+    bins = [(img > 128).astype(np.uint8) for img in images]
     sdist = np.zeros((N, h, w), dtype=np.float32)
+    acc = np.zeros((h, w), dtype=np.float32)
+
     for i in range(N):
-        pos = cv2.distanceTransform(bins[i],     cv2.DIST_L2, cv2.DIST_MASK_PRECISE)
-        neg = cv2.distanceTransform(1 - bins[i], cv2.DIST_L2, cv2.DIST_MASK_PRECISE)
-        si = pos.copy()
-        si[bins[i] == 0] = -neg[bins[i] == 0]
+        prev = images[i - 1].astype(np.float32)
+        curr = images[i].astype(np.float32)
+
+        # 1) SDF 重み
+        bin_curr = (curr > 85).astype(np.uint8) * 255
+        bin_prev = (prev > 85).astype(np.uint8) * 255
+
+        sdfA = cv2.distanceTransform(bins[i], cv2.DIST_L2, cv2.DIST_MASK_PRECISE)
+        sdfB = cv2.distanceTransform(1 - bins[i], cv2.DIST_L2, cv2.DIST_MASK_PRECISE)
+
+        # 2) 重み w を計算
+        w_sdf = sdfA / (sdfA + sdfB + 1e-6)
+
+        # 3) まず水平ブラー（float）
+        w_blur = cv2.blur(w_sdf, (2 * radius + 1, 2 * radius + 1))
+
+        # 4) 量子化（重みを LEVELS 段階に丸める）
+        wq = np.floor(w_blur * levels + 0.5)
+        wq = np.clip(wq, 0, levels) / float(levels)
+
+        # 5) 量子化後の wq に再度水平ブラー
+        w_smooth = cv2.blur(wq, (2 * radius + 1, 2 * radius + 1))
+
+        # 6) ブレンド → acc に足し込み
+        blend = bin_prev * (1.0 - w_smooth) + bin_curr * w_smooth
+        acc += blend
+
+        si = sdfA.copy()
+        si[bins[i] == 0] = -sdfB[bins[i] == 0]
         sdist[i] = si
 
-    # --- (2) cont 素 → 正規化 ---
+    # --- 後半：平均化した float32 画像を改めて LEVELS 段階に丸め込んで uint8 化 ---
+    avg_img = acc / (len(images) - 2)  # float32, 範囲はおおよそ 0～255
+
+    # --- 2) 各スライス間の補間を算出 ---
     inside = (sdist > 0)
     count = inside.sum(axis=0)
     i_idx = count - 1
-    mask = (i_idx >= 0) & (i_idx<N-1)
-    i_cl = np.clip(i_idx, 0, N-2).astype(np.int32)
-    ys = np.arange(h)[:,None]; xs = np.arange(w)[None,:]
-    si = sdist[i_cl, ys, xs]
-    snext = sdist[i_cl+1, ys, xs]
-    denom = si - snext
-    denom[np.abs(denom)<1e-6] = 1e-6
-    f = np.clip(si/denom, 0.0,1.0)
-    cont = np.zeros((h,w), np.float32)
+    ys = np.arange(h, dtype=np.int32)[:, None]
+    xs = np.arange(w, dtype=np.int32)[None, :]
+    i_clipped = np.clip(i_idx, 0, N - 2).astype(np.int32)
+    s_i = sdist[i_clipped, ys, xs]
+    s_next = sdist[i_clipped + 1, ys, xs]
+    denom = (s_i - s_next)
+    denom[np.abs(denom) < 1e-6] = 1e-6
+    f = np.clip(s_i / denom, 0.0, 1.0)
+
+    cont = np.zeros((h, w), dtype=np.float32)
+    mask = (i_idx >= 0) & (i_idx < N - 1)
     cont[mask] = i_idx[mask] + f[mask]
-    cont[i_idx >= N-1] = float(N-1)
-    cont_norm = cont / float(N-1)   # → [0,1]
+    cont[i_idx >= (N - 1)] = float(N - 1)
 
-    # --- (3) 横方向1Dガウス ×2 & 量子化 ---
-    h1 = cv2.GaussianBlur(cont_norm, (0,0), sigmaX=radius, sigmaY=0.0, borderType=bt)
-    q1 = np.clip(np.floor(h1*levels+0.5), 0, levels)/float(levels)
-    h2 = cv2.GaussianBlur(q1, (0,0), sigmaX=radius, sigmaY=0.0, borderType=bt)
+    # --- 3) 中央縦バンディング対策：横方向ブラーとの加重平均 ---
+    cont_hblur = cv2.blur(cont, (9, 1))  # 横方向にぼかす（縦線をぼかす）
+    cont = cv2.addWeighted(cont, 0.5, cont_hblur, 0.5, 0.0)
 
-    # --- (4) 中央帯除去 2D ブラー ---
-    blur2 = cv2.GaussianBlur(h2, (0,0), sigmaX=1.0, sigmaY=1.0, borderType=bt)
+    # --- 4) 軽度ガウシアン（縦横）で全体補正（radius=1固定） ---
+    cont = cv2.GaussianBlur(cont, (0, 0), sigmaX=radius, sigmaY=radius, borderType=cv2.BORDER_REPLICATE)
 
-    # --- (5) 最終量子化: round(x*255) ---
-    # 再正規化 → 量子化 → uint8
-    norm = np.clip(blur2, 0.0, 1.0)
-    out = np.round(norm * 255.0).astype(np.uint8)
-    return out
+    # --- 5) グローバル正規化 ---
+    mn, mx = float(cont.min()), float(cont.max())
+    if mx > mn:
+        cont = (cont - mn) / (mx - mn)
+    else:
+        cont = np.clip(cont, 0.0, 1.0)
+
+    # --- 6) 量子化 + 再ガウスブラーで微細な縞を吸収 ---
+    q = np.floor(cont * levels + 0.5) / float(levels)
+    q = cv2.GaussianBlur(q, (0, 0), sigmaX=radius, sigmaY=radius, borderType=cv2.BORDER_REPLICATE)
+
+    # --- 7) 出力（8bit） ---
+    output8 = np.clip(q * 255.0, 0.0, 255.0).astype(np.uint8)
+    return output8
+
+
+def blend_with_quantized_global_center(images, levels=4096, radius=1):
+    """
+    ・フレームペアごとに SDF 重みを計算し、水平ブラー→量子化→再度ブラー をかけた後に合成
+    ・最後にできた float32 の結果画像全体を改めて LEVELS 段階に丸め込んでから uint8 化
+    """
+
+    h, w = images[0].shape
+    acc = np.zeros((h, w), dtype=np.float32)
+
+    # --- 前半：各フレームペアごとにブレンドして acc に足し込む ---
+    for i in range(1, len(images) - 1):
+        prev = images[i - 1].astype(np.float32)
+        curr = images[i].astype(np.float32)
+
+        # 1) SDF 重み
+        bin_curr = (curr > 85).astype(np.uint8) * 255
+        bin_prev = (prev > 85).astype(np.uint8) * 255
+        sdfA = cv2.distanceTransform(bin_curr, cv2.DIST_L2, cv2.DIST_MASK_PRECISE)
+        sdfB = cv2.distanceTransform(255 - bin_prev, cv2.DIST_L2, cv2.DIST_MASK_PRECISE)
+
+        # 2) 重み w を計算
+        w_sdf = sdfA / (sdfA + sdfB + 1e-6)
+
+        # 3) まず水平ブラー（float）
+        w_blur = cv2.blur(w_sdf, (2 * radius + 1, 2 * radius + 1))
+
+        # 4) 量子化（重みを LEVELS 段階に丸める）
+        wq = np.floor(w_blur * levels + 0.5)
+        wq = np.clip(wq, 0, levels) / float(levels)
+
+        # 5) 量子化後の wq に再度水平ブラー
+        w_smooth = cv2.blur(wq, (2 * radius + 1, 2 * radius + 1))
+
+        # 6) ブレンド → acc に足し込み
+        blend = prev * (1.0 - w_smooth) + curr * w_smooth
+        acc += blend
+
+    # --- 後半：平均化した float32 画像を改めて LEVELS 段階に丸め込んで uint8 化 ---
+    avg_img = acc / (len(images) - 2)  # float32, 範囲はおおよそ 0～255
+
+    threshold = 255.0
+    # 例: ここで画素値[0,255]をまず [0,1] に正規化し、LEVELS 段階に量子化→再度 [0,255] に戻す
+    norm = np.clip(avg_img / threshold, 0.0, 1.0)      # [0,1] の float32
+    q = np.floor(norm * levels) # [0, LEVELS] の float
+    q = np.clip(q, 0, levels) / float(levels)     # [0,1] の float に戻す
+    output = np.clip(q * threshold, 0, threshold).astype(np.uint8)
+    return output
+
 
 
 
 if __name__ == "__main__":
     images = load_images("./Assets")
     sample = cv2.imread("./sample.png", cv2.IMREAD_GRAYSCALE)
-    result = blend_with_quantized_global(images, levels=LEVELS, radius=RADIUS)
+    result = blend_with_quantized_global_center(images, levels=LEVELS, radius=RADIUS)
     cv2.imwrite("sdf_combined.png", result)  # uint8 の PNG
 
     evaluate(result, sample)
