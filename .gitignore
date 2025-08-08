@@ -9,6 +9,10 @@ __pycache__/
 
 /Julius/thirdparty/
 
+/SDF/dist/
+/SDF/build/
+/SDF/sdf_texture_generator.spec
+
 *.pyc
 
 
