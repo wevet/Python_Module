@@ -1,11 +1,27 @@
 import cv2
 import numpy as np
 import os
+import matplotlib.pyplot as plt
 
 # 量子化の段階数（4096 にすると最終的に 12bit 相当の階調。必要に応じて 16384 などに増やしても OK）
-LEVELS = 4096
+LEVELS = 32768
 # 水平ブラー（cv2.blur）の半径：（2*RADIUS+1）×(2*RADIUS+1) カーネルを使う
 RADIUS = 1
+# トレンド除去のために左右何割を利用するか
+EDGE_RATIO = 0.1
+
+
+
+def show_diff_heatmap(output, sample, fname="diff_heatmap.png"):
+    diff = cv2.absdiff(output, sample).astype(np.float32)
+    # 正規化して 0..1 に
+    diff_norm = diff / diff.max()
+    plt.imshow(diff_norm, cmap='hot', vmin=0, vmax=1)
+    plt.colorbar(label='Normalized Absolute Difference')
+    plt.title("Difference Heatmap")
+    plt.axis('off')
+    plt.savefig(fname, bbox_inches='tight', pad_inches=0)
+    print(f"▶️ ヒートマップを {fname} に保存しました")
 
 
 def load_images(folder):
@@ -28,14 +44,9 @@ def evaluate(output, sample):
     return diff
 
 
-
 def blend_with_quantized_global_side(images, levels=4096, radius=1):
     """
     sample.png に極力近づけるため、中央および左右のバンディングを除去する。
-    - a~h の画像からのみ合成
-    - load_images, evaluate の変更禁止
-    - main 関数は変更せず、関数名は blend_with_quantized_global で固定
-    - radius=1 のままで最大限バンディングを除去
     """
 
     N = len(images) - 1
@@ -171,13 +182,121 @@ def blend_with_quantized_global_center(images, levels=4096, radius=1):
     return output
 
 
+def blend_with_quantized_global(images, levels=1, trans_blur=1):
+    """
+    a~h のグレースケール画像リスト images を受け取り、
+    φ2/(φ2−φ1) のペアごと遷移率を累積し、
+    平均→グローバル量子化（levels=255）→軽いガウシアンブラー→
+    明度を1段階上げる → 'sdf_combined.png' に出力します。
+    """
+    # 1) パラメータ固定
+    #levels = 255
+    h, w = images[0].shape
+    acc = np.zeros((h, w), dtype=np.float32)
+    k = (2*trans_blur+1, 2*trans_blur+1)
+
+    # 2) 符号付き距離場 φ を作るヘルパー
+    def signed_sdf(bin_img):
+        d_out = cv2.distanceTransform(255 - bin_img, cv2.DIST_L2, cv2.DIST_MASK_PRECISE)
+        d_in = cv2.distanceTransform(bin_img, cv2.DIST_L2, cv2.DIST_MASK_PRECISE)
+        return d_in - d_out
+
+    # 3) 各ペア prev->curr で遷移率 w を計算し累積
+    for i in range(1, len(images) - 1):
+        prev = images[i - 1].astype(np.float32)
+        curr = images[i].astype(np.float32)
+
+        b1 = (prev > 128).astype(np.uint8)*255
+        b2 = (curr > 128).astype(np.uint8)*255
+
+        sigma_1 = signed_sdf(b1)
+        sigma_2 = signed_sdf(b2)
+
+        denom = (sigma_2 - sigma_1) + 1e-6
+        w_raw = sigma_2 / denom
+        np.clip(w_raw, 0.0, 1.0, out=w_raw)
+
+        w = cv2.blur(w_raw.astype(np.float32), k)
+        acc += prev * (1.0 - w) + curr * w
+
+    # 4) 平均化 → 0..1 正規化
+    n_pairs = len(images) - 1
+    avg = acc / float(n_pairs)
+    norm = np.clip(avg / 255.0, 0.0, 1.0)
+
+    # 5) グローバル量子化 → 0..255 に戻す
+    q = np.floor(norm * levels + 0.5)
+    #q = np.rint(norm * 255)  # 最近接整数に丸め
+    #q = np.clip(q, 0, 255)
+    np.clip(q, 0, levels, out=q)
+    out = (q / float(levels) * 255.0).astype(np.uint8)
+
+    # ── ここで「1段階分」明るくする ──
+    # levels=255 なのでステップ幅は 255/255=1
+    brightened = cv2.add(out, 10)  # 自動クリップ
+
+    # 6) 軽いガウシアンブラーでバンディング抑制
+    out_smooth = cv2.GaussianBlur(brightened, (0,0), sigmaX=0.3, sigmaY=0.3)
+
+    return out_smooth
+
+
+def blend_and_save_each(images, out_dir="blends"):
+    os.makedirs(out_dir, exist_ok=True)
+    h, w = images[0].shape
+    k_trans = (2*TRANS_BLUR+1, 2*TRANS_BLUR+1)
+
+    for idx in range(1, len(images)):
+        prev = images[idx-1].astype(np.float32)
+        curr = images[idx].astype(np.float32)
+
+        # 1) 前後フレームのバイナリ
+        bin1 = (prev > 128).astype(np.uint8) * 255
+        bin2 = (curr > 128).astype(np.uint8) * 255
+
+        # 2) 符号付き距離場 φ1, φ2 を計算
+        def signed_sdf(bin_img):
+            d_out = cv2.distanceTransform(255 - bin_img, cv2.DIST_L2, cv2.DIST_MASK_PRECISE)
+            d_in  = cv2.distanceTransform(bin_img,         cv2.DIST_L2, cv2.DIST_MASK_PRECISE)
+            return d_in - d_out
+
+        φ1 = signed_sdf(bin1)
+        φ2 = signed_sdf(bin2)
+
+        # 3) 遷移率 w_raw = φ2 / (φ2 - φ1) で 0→1
+        denom = (φ2 - φ1) + 1e-6
+        w_raw = φ2 / denom
+        w_raw = np.clip(w_raw, 0.0, 1.0)
+
+        # ログ出力
+        print(f"--- Pair {idx-1}->{idx} ---")
+        print(f"raw    : min={w_raw.min():.3f}, max={w_raw.max():.3f}, mean={w_raw.mean():.3f}")
+
+        # 4) 大きなブラーで滑らかに
+        w_smooth = cv2.blur(w_raw.astype(np.float32), k_trans)
+        print(f"smoothed: min={w_smooth.min():.3f}, max={w_smooth.max():.3f}, mean={w_smooth.mean():.3f}")
+
+        # 5) 合成
+        blended = prev * (1.0 - w_smooth) + curr * w_smooth
+        out_u8  = np.clip(blended, 0, 255).astype(np.uint8)
+
+        # 6) 保存
+        path = os.path.join(out_dir, f"blend_{idx-1:02d}_{idx:02d}.png")
+        cv2.imwrite(path, out_u8)
+        print(f"▶️ 保存しました: {path}\n")
+
+    print("✅ 全ペアの合成が完了しました。")
+
+
 
 
 if __name__ == "__main__":
     images = load_images("./Assets")
     sample = cv2.imread("./sample.png", cv2.IMREAD_GRAYSCALE)
-    result = blend_with_quantized_global_center(images, levels=LEVELS, radius=RADIUS)
-    cv2.imwrite("sdf_combined.png", result)  # uint8 の PNG
-
+    result = blend_with_quantized_global(images, levels=LEVELS)
+    cv2.imwrite("sdf_combined.png", result)
     evaluate(result, sample)
+
+    show_diff_heatmap(result, sample)
+
 
